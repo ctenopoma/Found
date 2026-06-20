@@ -1,0 +1,94 @@
+# PoC 環境: 検証A(ACL権限フィルタ) / B(Linux→SMB) / C(認証) 用
+#
+#   samba-ad     : テスト用 AD ドメインコントローラ (ユーザー/グループ提供)
+#   fileserver   : AD 参加の SMB ファイルサーバ (ACL 付き共有)
+#   opensearch   : Fess のインデックスストア
+#   fess         : クロール + 全文検索 + 権限フィルタ
+#
+# 起動: docker compose up -d --build
+# 詳細手順は README.md を参照。
+
+services:
+  samba-ad:
+    build: ./samba-ad
+    container_name: poc-samba-ad
+    hostname: dc1
+    privileged: true
+    environment:
+      DOMAIN: POC.LOCAL
+      DOMAIN_NETBIOS: POC
+      ADMIN_PASSWORD: Passw0rd!
+    ports:
+      - "389:389"      # LDAP
+      - "636:636"      # LDAPS
+      - "88:88/udp"    # Kerberos
+      - "445:4450"     # (衝突回避: ホスト 4450)
+    volumes:
+      - samba-ad-data:/var/lib/samba
+    networks:
+      poc:
+        aliases:
+          - dc1.poc.local
+
+  fileserver:
+    build: ./fileserver
+    container_name: poc-fileserver
+    hostname: fs1
+    privileged: true
+    depends_on:
+      - samba-ad
+    environment:
+      DOMAIN: POC.LOCAL
+      DOMAIN_NETBIOS: POC
+      ADMIN_PASSWORD: Passw0rd!
+      DC_HOST: dc1.poc.local
+    dns:
+      - 172.30.0.10        # samba-ad の固定IP (下記 networks 参照)
+    ports:
+      - "445:445"          # SMB
+    volumes:
+      - fileserver-data:/srv/share
+    networks:
+      poc:
+        aliases:
+          - fs1.poc.local
+
+  opensearch:
+    image: ghcr.io/codelibs/fess-opensearch:2.18.0
+    container_name: poc-opensearch
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    networks:
+      - poc
+
+  fess:
+    image: ghcr.io/codelibs/fess:14.19.0
+    container_name: poc-fess
+    depends_on:
+      - opensearch
+    environment:
+      - "SEARCH_ENGINE_HTTP_URL=http://opensearch:9200"
+      - "FESS_DICTIONARY_PATH=/usr/share/opensearch/config/dictionary/"
+    ports:
+      - "8080:8080"        # Fess 管理画面 / 検索 UI
+    networks:
+      - poc
+
+volumes:
+  samba-ad-data:
+  fileserver-data:
+  opensearch-data:
+
+networks:
+  poc:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
