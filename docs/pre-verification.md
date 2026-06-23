@@ -29,16 +29,31 @@ F は最後
 ### 共通の前提条件（全検証の前に確認）
 
 - [ ] **時刻同期**：全サーバの時刻ズレが 5 分以内（Kerberos の許容差）。NTP を構成
-- [ ] **名前解決**：アプリ/Fess サーバから DC・ファイルサーバの FQDN が DNS で引ける
-   （`nslookup dc1.poc.local` / `nslookup fs1.poc.local`）
-- [ ] **疎通**：必要ポートが開いている（下表）
+- [ ] **名前解決**：アプリ/Fess サーバから DC・ファイルサーバの名前が IP に変換できる
+   （以下をアプリ・Fess サーバ上で実行。IP が返れば OK）
+   ```bash
+   nslookup dc1.poc.local    # DC（認証サーバ）の名前解決
+   nslookup fs1.poc.local    # ファイルサーバの名前解決
+   ```
+   > IP がわかっている場合は `nslookup` を省略し、以下の疎通確認を IP 直指定で実施してもよい。
+- [ ] **疎通**：必要な通信経路ごとにポートが開いているか確認する（下表＋コマンド）
 
-| 用途 | ポート | 方向 |
-|---|---|---|
-| LDAP / LDAPS | 389 / 636 | アプリ・Fess → DC |
-| Kerberos | 88 (tcp/udp) | アプリ・Fess → DC |
-| SMB | 445 | アプリ・Fess → ファイルサーバ |
-| Fess UI/API | 8080 | クライアント → Fess |
+| 確認元 | 確認先 | 用途 | ポート |
+|---|---|---|---|
+| アプリ・Fessサーバ | DC（`dc1.poc.local`） | LDAP | 389 |
+| アプリ・Fessサーバ | DC（`dc1.poc.local`） | LDAPS | 636 |
+| アプリ・Fessサーバ | ファイルサーバ（`fs1.poc.local`） | SMB | 445 |
+| クライアント（ブラウザ） | Fessサーバ | Fess UI/API | 8080 |
+
+```bash
+# アプリ・Fessサーバ上で実行する
+nc -vz dc1.poc.local 389    # DC への LDAP
+nc -vz dc1.poc.local 636    # DC への LDAPS
+nc -vz fs1.poc.local 445    # ファイルサーバへの SMB
+
+# クライアント（PC）から実行する
+# ブラウザで http://<Fessサーバip>:8080 を開いて画面が返るか確認
+```
 
 > PoC を `verification/` のコンテナで行う場合は、まず `docker compose up -d --build` で
 > 全サービスを起動し、`docker compose logs -f samba-ad fileserver` で provision とドメイン
