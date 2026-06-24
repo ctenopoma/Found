@@ -114,7 +114,7 @@ nc -vz fs1.poc.local 445    # ファイルサーバへの SMB
 |---|---|---|
 | `NT_STATUS_LOGON_FAILURE` | 資格情報誤り / 時刻ズレ | パスワード・NTP 確認 |
 | `NT_STATUS_CONNECTION_REFUSED` | 445 閉塞 | FW / `nc -vz` |
-| `protocol negotiation failed` | SMB バージョン不一致 | `-m SMB2`/`SMB3` で再試行 |
+| `protocol negotiation failed` | SMB バージョン不一致 | `-m SMB2`/`SMB3` で再試行。Fess 側は検証A手順1の `jvm.crawler.options` で `jcifs.smb.client.maxVersion=SMB311` を設定 |
 
 ---
 
@@ -199,12 +199,35 @@ nc -vz fs1.poc.local 445    # ファイルサーバへの SMB
 1. **Fess のファイルクロール設定を登録**（管理画面 **クローラ > ファイルシステム**）
    - 名前: `poc-share`
    - パス: `smb://fs1.poc.local/share/`
-   - 設定パラメータ（クローラ設定欄）に SMB 認証を記述
-     ```
-     client.smb1.server.host=fs1.poc.local
-     # 認証情報は「ファイル認証」設定で svc_fess を登録
-     ```
-   - **クローラ > ファイル認証** で `fs1.poc.local` に `POC\svc_fess` を登録
+     > **重要（SMB バージョン）**：必ず `smb://` スキームを使う。`smb1://` は
+     > **SMB1 専用クライアント**（旧 jcifs）に切り替わり、SMB1 を無効化した本番
+     > サーバには接続できない。Fess はスキームでクライアントを選ぶ：
+     > - `smb://`  → jcifs-ng（**SMB2/SMB3** 対応）
+     > - `smb1://` → 旧 jcifs（**SMB1 のみ**）
+   - 認証情報は **クローラ > ファイル認証** で登録する（設定パラメータ欄ではない）
+     - ホスト名: `fs1.poc.local` / ポート: `445` / スキーム: `SAMBA`
+     - ユーザー: `svc_fess` / パスワード / ドメイン: `POC`
+     > ホストは URL から取得されるため、設定パラメータ欄に
+     > `client.smb1.server.host=...` のようなキーは**書かない**（実在しない）。
+
+   > **SMB3 必須サーバへの接続（最重要・本番の定番ハマりどころ）**
+   > jcifs-ng の既定は `minVersion=SMB1` / `maxVersion=SMB210`（= SMB2.1 止まり）。
+   > 本番サーバが SMB1 無効 / SMB3 必須だと negotiate に失敗する。Fess の SMB
+   > クライアントは jcifs プロパティを **`System.getProperties()`** から読み、かつ
+   > **クロールは別 JVM プロセス**で動くため、クロール設定欄ではなく
+   > `app/WEB-INF/classes/fess_config.properties` の **`jvm.crawler.options`** に
+   > JVM オプションとして渡す（ここを間違えると効かない）。
+   > ```properties
+   > jvm.crawler.options=...既存の値はそのまま...\
+   > -Djcifs.smb.client.minVersion=SMB202\n\
+   > -Djcifs.smb.client.maxVersion=SMB311\n\
+   > ```
+   > - `minVersion=SMB202`：SMB1 ネゴシエーションを打ち切る
+   > - `maxVersion=SMB311`：SMB3.1.1 まで許可
+   > - 署名必須サーバで弾かれる場合は `-Djcifs.smb.client.ipcSigningEnforced=false` も検討
+   >
+   > 設定後は Fess を再起動してから再クロールする。検証Bで `smbclient -m SMB3` が
+   > 通っていれば、サーバ側は SMB3 で待っている＝この設定で到達できるはず。
 
 2. **権限（ACL）取得を有効化**
    - クロール設定で、ファイルの許可情報を**ロール / 仮想ホスト（permission）**として
