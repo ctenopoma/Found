@@ -210,24 +210,85 @@ nc -vz fs1.poc.local 445    # ファイルサーバへの SMB
      > ホストは URL から取得されるため、設定パラメータ欄に
      > `client.smb1.server.host=...` のようなキーは**書かない**（実在しない）。
 
-   > **SMB3 必須サーバへの接続（最重要・本番の定番ハマりどころ）**
-   > jcifs-ng の既定は `minVersion=SMB1` / `maxVersion=SMB210`（= SMB2.1 止まり）。
-   > 本番サーバが SMB1 無効 / SMB3 必須だと negotiate に失敗する。Fess の SMB
-   > クライアントは jcifs プロパティを **`System.getProperties()`** から読み、かつ
-   > **クロールは別 JVM プロセス**で動くため、クロール設定欄ではなく
-   > `app/WEB-INF/classes/fess_config.properties` の **`jvm.crawler.options`** に
-   > JVM オプションとして渡す（ここを間違えると効かない）。
-   > ```properties
-   > jvm.crawler.options=...既存の値はそのまま...\
-   > -Djcifs.smb.client.minVersion=SMB202\n\
-   > -Djcifs.smb.client.maxVersion=SMB311\n\
-   > ```
-   > - `minVersion=SMB202`：SMB1 ネゴシエーションを打ち切る
-   > - `maxVersion=SMB311`：SMB3.1.1 まで許可
-   > - 署名必須サーバで弾かれる場合は `-Djcifs.smb.client.ipcSigningEnforced=false` も検討
-   >
-   > 設定後は Fess を再起動してから再クロールする。検証Bで `smbclient -m SMB3` が
-   > 通っていれば、サーバ側は SMB3 で待っている＝この設定で到達できるはず。
+#### SMB3 必須サーバへの接続設定（最重要・本番の定番ハマりどころ）
+
+jcifs-ng の既定は `minVersion=SMB1` / `maxVersion=SMB210`（= SMB2.1 止まり）。
+本番サーバが SMB1 無効 / SMB3 必須だと negotiate に失敗する。Fess の SMB
+クライアントは jcifs プロパティを **`System.getProperties()`** から読み、かつ
+**クロールは Fess 本体とは別の JVM プロセス**で起動されるため、jcifs の設定は
+クロール設定欄でも通常の JVM オプションでもなく、**`jvm.crawler.options`** に
+渡さないと効かない。以下を順に実施する。
+
+**手順 1: `fess_config.properties` の場所を特定する**（インストール形態で異なる）
+
+| 形態 | パス |
+|---|---|
+| zip/tar.gz 展開版 | `<FESS_HOME>/app/WEB-INF/classes/fess_config.properties` |
+| rpm / deb | `/usr/share/fess/app/WEB-INF/classes/fess_config.properties` |
+| Docker (公式 image) | コンテナ内 `/usr/share/fess/app/WEB-INF/classes/fess_config.properties`。永続化するなら同パスをボリュームマウント、または `compose` の `environment` で上書き |
+
+```bash
+# 見つからない場合は検索
+find / -name fess_config.properties 2>/dev/null
+```
+
+**手順 2: `jvm.crawler.options` に jcifs のプロトコル設定を追記**
+
+既存の `jvm.crawler.options=...` ブロックを探し、**末尾の行に続けて**追記する。
+このプロパティは「1行=1オプション」を `\n\`（改行＋バックスラッシュ）で連結する
+独特の書式。**書式を崩すとクロール JVM が起動しなくなる**ので注意。
+
+```properties
+jvm.crawler.options=-Djava.awt.headless=true\n\
+... 既存の行はそのまま ...\n\
+-Djcifs.smb.client.minVersion=SMB202\n\
+-Djcifs.smb.client.maxVersion=SMB311\n\
+-Djcifs.smb.client.ipcSigningEnforced=false
+```
+
+- `minVersion=SMB202`：SMB1 ネゴシエーションを打ち切る（SMB1 を試行させない）
+- `maxVersion=SMB311`：SMB3.1.1 まで許可
+- `ipcSigningEnforced=false`：署名強制サーバで IPC$ 接続が弾かれる場合のみ。
+  不要なら付けない（最小構成でまず試す）
+- 最終行末には `\n\` を付けない
+
+> Docker で properties を編集したくない場合は、環境変数
+> `FESS_JAVA_OPTS` ではなくクロール JVM 用の指定が必要なので、結局
+> `jvm.crawler.options` を上書きするのが確実。
+
+**手順 3: Fess を再起動**
+
+```bash
+# systemd
+sudo systemctl restart fess
+# zip 版
+<FESS_HOME>/bin/fess stop ; <FESS_HOME>/bin/fess start
+# docker compose
+docker compose restart fess
+```
+
+**手順 4: 再クロールして結果を確認**
+
+1. 管理画面 **システム > スケジューラ > Default Crawler** を「今すぐ実行」
+2. **システム情報 > ログファイル** で `fess-crawler.log`（または `crawler.log`）を確認
+   - 成功：`sales_case/quote.txt` / `eng_case/design.txt` がインデックスされる
+   - 失敗時に見るキーワード：
+     - `SmbException` / `Failed to connect` → まだ negotiate 失敗。min/max が
+       効いていない（書式崩れ・再起動忘れ・編集ファイル違いを疑う）
+     - `0x...C000006D` (`LOGON_FAILURE`) → 認証情報。ファイル認証設定を見直す
+     - `signing` 関連 → `ipcSigningEnforced=false` を追加
+
+**手順 5: 実際にどの SMB バージョンで繋がったか裏取り（任意）**
+
+```bash
+# Fess を動かしているホストからサーバへ実際に張られる接続のダイアレクトを確認
+# (server 側 samba なら) smbstatus でクライアントのプロトコルが SMB3_* か確認
+sudo smbstatus --processes
+```
+
+> 検証Bで `smbclient -m SMB3` が通っていれば、サーバ側は SMB3 で待っている＝
+> 上記設定で Fess からも到達できるはず。逆に検証Bの SMB3 が NG なら、これは
+> Fess 設定ではなくサーバ/FW 側の問題なので先にそちらを解消する。
 
 2. **権限（ACL）取得を有効化**
    - クロール設定で、ファイルの許可情報を**ロール / 仮想ホスト（permission）**として
